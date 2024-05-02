@@ -1,3 +1,4 @@
+from ast import Dict
 import queue
 from flask import (
     Flask,
@@ -9,14 +10,15 @@ from flask import (
     send_from_directory,
 )
 from flask_cors import CORS, cross_origin
-from message_announcer import MessageAnnouncer
 from utils import predict, hash_file, format_sse
 from werkzeug.utils import secure_filename
 import os
 from pathlib import Path
 from eventloopthread import run_coroutine
 import json
-
+import cv2
+from flask_queue_sse import ServerSentEvents
+import time
 
 denoised_images = {}
 
@@ -30,11 +32,17 @@ app.config["CORS_HEADERS"] = "Content-Type"
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
 app.add_url_rule("/denoised/<name>", endpoint="download_file", build_only=True)
+app.add_url_rule("/uploaded/<name>", endpoint="download_uploaded_file", build_only=True)
 
 
 @app.route("/denoised/<name>")
 def download_file(name):
     return send_from_directory(DENOISED_FOLDER, name)
+
+
+@app.route("/uploads/<name>")
+def download_uploaded_file(name):
+    return send_from_directory(app.config["UPLOAD_FOLDER"] + "/", name)
 
 
 @app.route("/")
@@ -61,9 +69,13 @@ def denoise():
         filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         file.save(filepath)
         hash = hash_file(filepath)
+        img = cv2.imread(filepath)
+        cv2.imwrite(os.path.join(app.config["UPLOAD_FOLDER"], hash + ".jpg"), img)
+        os.unlink(filepath)
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], hash + ".jpg")
         if hash in denoised_images:
             return {"id": hash}, 200
-        announcer = MessageAnnouncer()
+        announcer = ServerSentEvents()
         denoised_images[hash] = announcer
         run_coroutine(
             predict(
@@ -83,22 +95,18 @@ def listen(id):
     if id not in denoised_images:
         return {"error": "No such id found"}, 404
     denoised_image = Path(DENOISED_FOLDER + id + ".jpg")
+    url = "/denoised/" + id + ".jpg"
     if denoised_image.is_file():
-        msg = format_sse(
-            data=json.dumps(
-                {"id": id, "filepath": url_for("download_file", name=id + ".jpg")}
-            ),
-            event="completed",
-        )
-        denoised_images[id].announce(msg=msg)
+        msg = {
+            "id": id,
+            "filepath": url,
+            "realpath": url.replace("denoised", "uploads"),
+        }
+        denoised_images[id].send(msg, event="end")
+    else:
+        print("Path no found", denoised_image)
 
-    def stream():
-        messages = denoised_images[id].listen()  # returns a queue.Queue
-        while True:
-            msg = messages.get()  # blocks until a new message arrives
-            yield msg
-
-    return Response(stream(), mimetype="text/event-stream")
+    return denoised_images[id].response()
 
 
 if __name__ == "__main__":

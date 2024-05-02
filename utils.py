@@ -1,11 +1,9 @@
 import cv2
 from flask import url_for
 import numpy as np
-from message_announcer import MessageAnnouncer
 import tensorflow as tf
-import json
-import asyncio
 import hashlib
+from flask_queue_sse import ServerSentEvents
 
 
 def format_sse(data: str, event=None) -> str:
@@ -21,8 +19,8 @@ def format_sse(data: str, event=None) -> str:
     return msg
 
 
-class MessageAnnouncerCallback(tf.keras.callbacks.Callback):
-    def __init__(self, announcer: MessageAnnouncer, batch_length: int):
+class ServerSentEventsCallback(tf.keras.callbacks.Callback):
+    def __init__(self, announcer: ServerSentEvents, batch_length: int):
         super().__init__()
         self.announcer = announcer
         self.batch_length = batch_length
@@ -35,8 +33,7 @@ class MessageAnnouncerCallback(tf.keras.callbacks.Callback):
 
 
 def announce_progress(announcer, msg):
-    msg = format_sse(data=json.dumps(msg))
-    announcer.announce(msg=msg)
+    announcer.send(msg)
 
 
 def get_patches(file_name, patch_size, crop_sizes):
@@ -91,7 +88,7 @@ model = tf.keras.models.load_model(
 
 
 async def predict(
-    id: str, image_path: str, save_path: str, announcer: MessageAnnouncer
+    id: str, image_path: str, save_path: str, announcer: ServerSentEvents
 ):
     patches = get_patches(image_path, 40, [1])
     test_image = cv2.imread(image_path)
@@ -104,8 +101,9 @@ async def predict(
     )
     noisy_image = create_image_from_patches(patches, test_image.shape) / 255.0
     denoised_patches = model.predict(
-        patches_noisy, callbacks=[MessageAnnouncerCallback(announcer, len(patches))]
+        patches_noisy, callbacks=[ServerSentEventsCallback(announcer, len(patches))]
     )
+    print("prediction complete")
     denoised_patches = tf.clip_by_value(
         denoised_patches, clip_value_min=0.0, clip_value_max=1.0
     )
@@ -116,13 +114,15 @@ async def predict(
         save_path,
         cv2.cvtColor((255 * denoised_image).astype("uint8"), cv2.COLOR_RGB2BGR),
     )
-    msg = format_sse(
-        data=json.dumps(
-            {"id": id, "filepath": url_for("download_file", name=id + ".jpg")}
-        ),
-        event="completed",
-    )
-    announcer.announce(msg=msg)
+    print("image written")
+    data = {
+        "id": id,
+        "filepath": "/denoised/" + id + ".jpg",
+        "realpath": "/uploads/" + id + ".jpg",
+    }
+    print("data primed")
+    announcer.send(data, event="end")
+    print("message send")
     return patches, denoised_patches, noisy_image, denoised_image
 
 
