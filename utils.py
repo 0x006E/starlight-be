@@ -1,9 +1,14 @@
+from cgi import test
 import cv2
 from flask import url_for
 import numpy as np
 import tensorflow as tf
 import hashlib
 from flask_queue_sse import ServerSentEvents
+
+from empatches import EMPatches
+
+emp = EMPatches()
 
 
 def format_sse(data: str, event=None) -> str:
@@ -36,42 +41,6 @@ def announce_progress(announcer, msg):
     announcer.send(msg)
 
 
-def get_patches(file_name, patch_size, crop_sizes):
-    """This functions creates and return patches of given image with a specified patch_size"""
-    image = cv2.imread(file_name)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    height, width, channels = image.shape
-    patches = []
-    for crop_size in crop_sizes:  # We will crop the image to different sizes
-        crop_h, crop_w = int(height * crop_size), int(width * crop_size)
-        image_scaled = cv2.resize(
-            image, (crop_w, crop_h), interpolation=cv2.INTER_CUBIC
-        )
-        for i in range(0, crop_h - patch_size + 1, patch_size):
-            for j in range(0, crop_w - patch_size + 1, patch_size):
-                x = image_scaled[
-                    i : i + patch_size, j : j + patch_size
-                ]  # This gets the patch from the original image with size patch_size x patch_size
-                patches.append(x)
-    return patches
-
-
-def create_image_from_patches(patches, image_shape):
-    """This function takes the patches of images and reconstructs the image"""
-    image = np.zeros(
-        image_shape
-    )  # Create a image with all zeros with desired image shape
-    patch_size = patches.shape[1]
-    p = 0
-    for i in range(0, image.shape[0] - patch_size + 1, patch_size):
-        for j in range(0, image.shape[1] - patch_size + 1, patch_size):
-            image[i : i + patch_size, j : j + patch_size] = patches[
-                p
-            ]  # Assigning values of pixels from patches to image
-            p += 1
-    return np.array(image)
-
-
 def ssim_loss(y_true, y_pred):
     return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
 
@@ -90,8 +59,9 @@ model = tf.keras.models.load_model(
 async def predict(
     id: str, image_path: str, save_path: str, announcer: ServerSentEvents
 ):
-    patches = get_patches(image_path, 40, [1])
     test_image = cv2.imread(image_path)
+    test_image = cv2.cvtColor(test_image, cv2.COLOR_BGR2RGB)
+    patches, indices = emp.extract_patches(test_image, patchsize=40, overlap=0.2)
 
     patches = np.array(patches)
     patches = patches.astype("float32") / 255.0
@@ -99,7 +69,7 @@ async def predict(
     patches_noisy = tf.clip_by_value(
         patches_noisy, clip_value_min=0.0, clip_value_max=1.0
     )
-    noisy_image = create_image_from_patches(patches, test_image.shape) / 255.0
+    noisy_image = test_image / 255.0
     denoised_patches = model.predict(
         patches_noisy, callbacks=[ServerSentEventsCallback(announcer, len(patches))]
     )
@@ -109,7 +79,7 @@ async def predict(
     )
 
     # Creating entire denoised image from denoised patches
-    denoised_image = create_image_from_patches(denoised_patches, test_image.shape)
+    denoised_image = emp.merge_patches(denoised_patches, indices, mode="avg")
     cv2.imwrite(
         save_path,
         cv2.cvtColor((255 * denoised_image).astype("uint8"), cv2.COLOR_RGB2BGR),

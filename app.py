@@ -74,6 +74,7 @@ def denoise():
         os.unlink(filepath)
         filepath = os.path.join(app.config["UPLOAD_FOLDER"], hash + ".jpg")
         if hash in denoised_images:
+            print("id alread in dict")
             return {"id": hash}, 200
         announcer = ServerSentEvents()
         denoised_images[hash] = announcer
